@@ -53,7 +53,7 @@ you can use too many handle to dispose a request, like middleware.
 r.Use(m1).Get("/user",h).Use(m2)
 // m1 -> h -> m2
 ```
-run handle is order by depth 
+handle be run order by depth 
 ```go
 r.Use(m1)
 a:=r.Group("/api")

@@ -14,6 +14,11 @@ const (
 	type_tang         // 语法糖 如 bong/*/
 	type_param        // 有参数 但不是正则 如 /id/(id)/
 )
+const (
+	status_notfound = iota
+	status_methodnotallow
+	status_matched
+)
 
 type path struct {
 	path     []byte         // the full path
@@ -28,6 +33,7 @@ type Router struct {
 	root       *Node
 	paths      []path
 	handler404 Handler
+	handler405 Handler
 }
 
 // return self
@@ -63,6 +69,10 @@ func (p *Router) Controller(path string, c interface{}) *Node {
 func (p *Router) When404(h Handler) {
 	p.handler404 = h
 }
+// set 404 handler
+func (p *Router) When405(h Handler) {
+	p.handler405 = h
+}
 
 func (p *Router) Use(h ...Handler) *Node {
 	return p.root.Use(h...)
@@ -89,10 +99,17 @@ func (p *Router) Init() func(ctx *fasthttp.RequestCtx) {
 		c := pool.Get().(*Context)
 		c.RequestCtx = ctx
 		url := ctx.Path()
-		nodes, keys, values := match(url, ctx.Method(), p)
-		c.rKeys = keys
-		c.rValues = values
-		run(nodes, c)
+		status, nodes, keys, values := match(url, ctx.Method(), p)
+		switch status {
+		case status_notfound:
+			when404(c)
+		case status_methodnotallow:
+			when405(c)
+		case status_matched:
+			c.rKeys = keys
+			c.rValues = values
+			run(nodes, c)
+		}
 		pool.Put(c)
 	}
 	return f
@@ -107,6 +124,7 @@ func New() *Router {
 	}
 	r.root = node
 	r.handler404 = when404
+	r.handler405 = when405
 	return &r
 }
 
@@ -185,12 +203,13 @@ func when404(c *Context) {
 	c.SetStatusCode(404)
 }
 
+func when405(c *Context) {
+	c.WriteString("405 method not allowed")
+	c.SetStatusCode(405)
+}
+
 func run(nodes []*Node, c *Context) {
 	abort := false
-	if nodes == nil || len(nodes) == 0 {
-		when404(c)
-		return
-	}
 	for _, node := range nodes {
 		for _, handle := range node.handlers {
 			if c.abort {
@@ -206,16 +225,16 @@ func run(nodes []*Node, c *Context) {
 }
 
 // match router
-func match(url []byte, method []byte, router *Router) (nodes []*Node, keys [][]byte, values [][]byte) {
+func match(url []byte, method []byte, router *Router) (status int, nodes []*Node, keys [][]byte, values [][]byte) {
 	if len(url) == 0 {
 		url = []byte{'/'}
 	} else if url[len(url) - 1] != '/' {
 		url = append(url, '/')
 	}
 	for _, path := range router.paths {
-		ok, keys, values := isMatched(path, url, method)
-		if ok {
-			return path.nodes, keys, values
+		status, keys, values := isMatched(path, url, method)
+		if status != 0 {
+			return status, path.nodes, keys, values
 		}
 	}
 	return
@@ -225,11 +244,7 @@ var rk = []byte{')'}
 var lk = []byte{'('}
 
 // match one url and return url params
-func isMatched(path path, url []byte, method []byte) (ok bool, keys, values [][]byte) {
-	if path.method[0] != 'A' && bytes.Equal(method, path.method) {
-		ok = false
-		return
-	}
+func isMatched(path path, url []byte, method []byte) (status int, keys, values [][]byte) {
 	urlBase := path.path
 	switch path.types {
 	case type_tang:
@@ -237,7 +252,10 @@ func isMatched(path path, url []byte, method []byte) (ok bool, keys, values [][]
 		// 匹配 user/*/  => user/a/b/c/  => [0:a,1:b,2:c]
 		lbase := len(urlBase)
 		if bytes.Equal(url[:lbase - 2], urlBase[:lbase - 2]) {
-			ok = true
+			status = status_methodnotallow
+			if path.method[0] == 'A' || bytes.Equal(method, path.method) {
+				status = status_matched
+			}
 			if len(url) == lbase - 2 {
 				return
 			}
@@ -255,7 +273,10 @@ func isMatched(path path, url []byte, method []byte) (ok bool, keys, values [][]
 		}
 	case type_nomal:
 		if bytes.Equal(urlBase, url) {
-			ok = true
+			status = status_methodnotallow
+			if path.method[0] == 'A' || bytes.Equal(method, path.method) {
+				status = status_matched
+			}
 			return
 		}
 	case type_param:
@@ -269,11 +290,11 @@ func isMatched(path path, url []byte, method []byte) (ok bool, keys, values [][]
 			if i == 0 {
 				// user/
 				if bytes.Index(url, u) != 0 {
-					ok = false
+					status = 0
 					return
 				}
-				keys = make([][]byte, lus-1)
-				values = make([][]byte, lus-1)
+				keys = make([][]byte, lus - 1)
+				values = make([][]byte, lus - 1)
 				// 132/
 				url = url[len(u):]
 			} else {
@@ -283,17 +304,20 @@ func isMatched(path path, url []byte, method []byte) (ok bool, keys, values [][]
 				// /
 				//sp := nameAsp[1]
 				value := bytes.Split(url, nameAsp[1])
-				keys[i-1] = nameAsp[0]
-				values[i-1] = value[0]
+				keys[i - 1] = nameAsp[0]
+				values[i - 1] = value[0]
 				if len(value[1]) == 0 {
 					// is end of url
 					if i == lus - 1 {
-						ok = true
+						status = status_methodnotallow
+						if path.method[0] == 'A' || bytes.Equal(method, path.method) {
+							status = status_matched
+						}
 						return
 					} else {
 						// router url is not end, but url is end .
 						// has not enough params
-						ok = false
+						status = 0
 						return
 					}
 				}
@@ -304,7 +328,11 @@ func isMatched(path path, url []byte, method []byte) (ok bool, keys, values [][]
 	case type_reg:
 		vs := path.reg.FindAllSubmatch(url, -1)
 		if len(vs) == 1 {
-			ok = true
+			status = status_methodnotallow
+			if path.method[0] == 'A' || bytes.Equal(method, path.method) {
+				status = status_matched
+			}
+
 			k := vs[0][1:]
 			lk := len(k)
 			keys = make([][]byte, lk)

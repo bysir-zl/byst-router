@@ -65,9 +65,10 @@ func TestMatch(t *testing.T) {
 
 	// init
 
-	nodes, keys, values := match(util.S2B("/v1/c/1/2"), util.S2B("GET"), r)
+	status,nodes, keys, values := match(util.S2B("/v1/c/1/2"), util.S2B("GET"), r)
 
 	log.Print("---------")
+	log.Print(status)
 	log.Print(keys, values)
 	run(nodes, new(Context))
 }
